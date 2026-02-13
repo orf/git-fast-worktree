@@ -1,4 +1,4 @@
-module git-fast-worktree
+module github.com/orf/git-fast-worktree
 
 go 1.25.6
 
