@@ -17,9 +17,10 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "git-fast-worktree",
-	Short: "Create git worktrees using APFS copy-on-write cloning",
-	Long:  "Creates git worktrees using APFS copy-on-write cloning instead of git checkout.\nMust be run from within a git repository on macOS with an APFS volume.",
+	Use:          "git-fast-worktree",
+	Short:        "Create git worktrees using APFS copy-on-write cloning",
+	SilenceUsage: true,
+	Long:         "Creates git worktrees using APFS copy-on-write cloning instead of git checkout.\nMust be run from within a git repository on macOS with an APFS volume.",
 }
 
 var (
@@ -121,12 +122,25 @@ var addCmd = &cobra.Command{
 		wg.Wait()
 		println(fmt.Sprintf("clonefile:    %d entries (%v)", cloned.Load(), time.Since(stepStart).Round(time.Millisecond)))
 
-		// Phase 4: Update git index to match HEAD
+		// Phase 4: Update git index to match HEAD, reusing the source index's
+		// stat data so git doesn't re-hash every file on the first status.
 		stepStart = time.Now()
-		resetCmd := exec.Command("git", "-C", dst, "reset", "--no-refresh")
-		resetCmd.Stderr = os.Stderr
-		if err := resetCmd.Run(); err != nil {
-			return fmt.Errorf("git reset: %w", err)
+		seeded := true
+		if err := seedIndex(src, dst); err != nil {
+			seeded = false
+			println(fmt.Sprintf("not reusing source index: %v", err))
+		}
+		if err := gitReset(dst); err != nil {
+			if !seeded {
+				return err
+			}
+			println("reset with source index failed, retrying without it")
+			if err := removeIndex(dst); err != nil {
+				return err
+			}
+			if err := gitReset(dst); err != nil {
+				return err
+			}
 		}
 		println(fmt.Sprintf("git reset:    (%v)", time.Since(stepStart).Round(time.Millisecond)))
 
@@ -161,6 +175,55 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// seedIndex copies the source index into the new worktree. Clones keep each
+// file's mtime and size but get a new inode and ctime, so the worktree compares
+// only mtime and size (core.checkStat=minimal) for the copied stat data to match.
+func seedIndex(src, dst string) error {
+	if out, err := exec.Command("git", "-C", dst, "config", "--worktree", "core.checkStat", "minimal").CombinedOutput(); err != nil {
+		return fmt.Errorf("%s (run 'git config extensions.worktreeConfig true' to enable)", strings.TrimSpace(string(out)))
+	}
+	srcIndex, err := gitPath(src, "index")
+	if err != nil {
+		return err
+	}
+	if err := removeIndex(dst); err != nil {
+		return err
+	}
+	dstIndex, err := gitPath(dst, "index")
+	if err != nil {
+		return err
+	}
+	return unix.Clonefile(srcIndex, dstIndex, unix.CLONE_NOFOLLOW)
+}
+
+func gitReset(dir string) error {
+	cmd := exec.Command("git", "-C", dir, "reset", "--no-refresh")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git reset: %w", err)
+	}
+	return nil
+}
+
+func removeIndex(dir string) error {
+	index, err := gitPath(dir, "index")
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(index); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func gitPath(dir, name string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-path", name).Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --git-path %s: %w", name, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // gitToplevel returns the root directory of the current git repository.
