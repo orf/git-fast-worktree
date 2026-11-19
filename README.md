@@ -43,7 +43,7 @@ Flags:
 
 1. `git worktree add --no-checkout` registers the worktree with git
 2. Each top-level entry in the source repo (excluding `.git`) is cloned into the worktree using the APFS [`clonefile`](https://www.manpagez.com/man/2/clonefile/) syscall, which recursively clones entire directory trees without copying data
-3. `git reset --no-refresh` populates the git index to match HEAD
+3. The source repo's index is cloned into the worktree and `git reset --no-refresh` updates it to match HEAD. Entries that are unchanged between the two commits keep the source's stat data, and the worktree is set to `core.checkStat=minimal` (clones keep mtime and size but get a new inode and ctime), so the first `git status` doesn't re-read and hash every file. This needs `extensions.worktreeConfig`; without it the index is built from scratch and the first `git status` hashes every file
 
 Because `clonefile` is copy-on-write, the worktree initially shares all data blocks with the source repo and only allocates new storage when files are modified.
 
